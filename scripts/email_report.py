@@ -46,24 +46,54 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 
+MAX_SAMPLE_ROWS_PER_CODE = 5
+MAX_ERROR_CODES_DETAILED = 10
+
+
 def summarize_findings_csv(csv_path):
-    """Return (counts_by_level dict, total_rows, top_error_codes list) or None."""
+    """Return a dict describing the findings CSV, or None if it doesn't exist.
+
+    Keys: by_level, total, top_codes (code, count, ValidationName, sample rows).
+    Sample rows are capped per code so the email body stays a readable size;
+    the full list is always in the attached CSV.
+    """
     if not csv_path or not os.path.exists(csv_path):
         return None
     by_level = collections.Counter()
     by_code = collections.Counter()
+    code_name = {}
+    samples_by_code = collections.defaultdict(list)
     total = 0
     try:
         with open(csv_path, "r", encoding="utf-8", errors="replace", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 total += 1
-                by_level[row.get("Level", "?")] += 1
-                by_code[row.get("ErrorCode", "?")] += 1
+                level = row.get("Level", "?")
+                code = row.get("ErrorCode", "?")
+                by_level[level] += 1
+                by_code[code] += 1
+                code_name.setdefault(code, row.get("ValidationName", ""))
+                if len(samples_by_code[code]) < MAX_SAMPLE_ROWS_PER_CODE:
+                    samples_by_code[code].append({
+                        "Level": level,
+                        "ResourceType": row.get("ResourceType", ""),
+                        "ResourceID": row.get("ResourceID", ""),
+                        "NPI": row.get("NPI", ""),
+                        "Field": row.get("Field", ""),
+                        "Detail": row.get("Detail", ""),
+                    })
     except Exception as e:                                    # noqa: BLE001
         return {"error": "could not read findings CSV: %s" % e}
-    top = by_code.most_common(8)
-    return {"by_level": dict(by_level), "total": total, "top_codes": top}
+
+    top = by_code.most_common(MAX_ERROR_CODES_DETAILED)
+    top_codes = [
+        {"code": code, "count": n, "name": code_name.get(code, ""),
+         "samples": samples_by_code.get(code, [])}
+        for code, n in top
+    ]
+    return {"by_level": dict(by_level), "total": total, "top_codes": top_codes,
+            "distinct_codes": len(by_code)}
 
 
 SUBJECTS = {
@@ -100,13 +130,24 @@ def build_message(args, summary):
     else:
         if summary and "error" not in summary:
             lines.append("Findings summary (from %s):" % os.path.basename(args.csv_path or ""))
-            lines.append("  Total finding rows: %s" % summary["total"])
+            lines.append("  Total finding rows: %s across %s distinct error code(s)"
+                         % (summary["total"], summary.get("distinct_codes", "?")))
             for level in sorted(summary["by_level"], key=lambda k: (k == "?", k)):
                 lines.append("  Level %s: %s" % (level, summary["by_level"][level]))
+
             if summary["top_codes"]:
-                lines.append("  Top error codes:")
-                for code, n in summary["top_codes"]:
-                    lines.append("    %-10s %s" % (code, n))
+                lines.append("")
+                lines.append("Detail by error code (top %d, %d sample row(s) each -- full list in the attached CSV):"
+                             % (MAX_ERROR_CODES_DETAILED, MAX_SAMPLE_ROWS_PER_CODE))
+                for entry in summary["top_codes"]:
+                    lines.append("")
+                    lines.append("  %s  %s -- %s occurrence(s)"
+                                 % (entry["code"], entry["name"] or "(no description)", entry["count"]))
+                    for s in entry["samples"]:
+                        ref = s["ResourceID"] or s["NPI"] or "?"
+                        lines.append("    [L%s] %s/%s  field=%s  %s"
+                                     % (s["Level"], s["ResourceType"] or "?", ref,
+                                        s["Field"] or "-", s["Detail"] or ""))
             outcome = "findings reported" if summary["total"] else "no findings"
         elif summary and "error" in summary:
             lines.append("(Could not summarize findings CSV: %s)" % summary["error"])
