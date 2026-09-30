@@ -146,8 +146,8 @@ environment only:
 | `EMAIL_USERNAME` | yes | -- |
 | `EMAIL_PASSWORD` | yes | -- |
 | `EMAIL_TO` | yes (comma-separated OK) | -- |
-| `EMAIL_SMTP_HOST` | no | `smtp.office365.com` |
-| `EMAIL_SMTP_PORT` | no | `587` (STARTTLS) |
+| `SMTP_SERVER` | no | `smtp.office365.com` |
+| `SMTP_PORT` | no | `587` (STARTTLS) |
 
 Add these under **Settings -> Secrets and variables -> Actions -> New
 repository secret**. Nothing secret is ever printed to logs -- only the

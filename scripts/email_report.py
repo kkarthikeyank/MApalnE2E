@@ -5,7 +5,7 @@ email_report.py -- email formatting/sending ONLY. No validation logic.
 
 Sends one email per contract run, using smtplib and GitHub Actions secrets:
     EMAIL_USERNAME, EMAIL_PASSWORD, EMAIL_TO,
-    EMAIL_SMTP_HOST (default: smtp.office365.com), EMAIL_SMTP_PORT (default: 587)
+    SMTP_SERVER (default: smtp.office365.com), SMTP_PORT (default: 587)
 
 STARTTLS is used by default (matches the office365 default). Secrets are
 read only from the environment and are never printed/logged.
@@ -125,8 +125,8 @@ def build_message(args, summary):
 
 
 def send_email(subject, body, attachments):
-    host = os.environ.get("EMAIL_SMTP_HOST") or "smtp.office365.com"
-    port = int(os.environ.get("EMAIL_SMTP_PORT") or "587")
+    host = os.environ.get("SMTP_SERVER") or "smtp.office365.com"
+    port = int(os.environ.get("SMTP_PORT") or "587")
     username = os.environ.get("EMAIL_USERNAME")
     password = os.environ.get("EMAIL_PASSWORD")
     to_addr = os.environ.get("EMAIL_TO")

@@ -195,6 +195,11 @@ jobs:
           echo "EOF" >> "$GITHUB_ENV"
         env:
           PLAN_YEAR: ${{ env.PLAN_YEAR }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
 
       - name: Upload report artifacts
         if: always()
