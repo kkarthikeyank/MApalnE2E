@@ -1,0 +1,233 @@
+name: MPF End-to-End Validation
+
+# GitHub Actions controls WHEN validation runs, WHICH contract runs, change
+# detection, report handling, email notification and execution status.
+# mpf_audit.py (unmodified validation logic) is the single source of truth
+# for every actual CMS rule check.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: "Contract to validate (bypasses change detection)"
+        required: true
+        default: "ALL"
+        type: choice
+        options:
+          - ALL
+          - H1619
+          - H3124
+          - H5826
+          - H9207
+
+concurrency:
+  group: mpf-validation
+  cancel-in-progress: false
+
+env:
+  PLAN_YEAR: "2027"
+  ALL_CONTRACTS: "H1619,H3124,H5826,H9207"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Determine run mode and candidate contracts
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_mode=manual" >> "$GITHUB_OUTPUT"
+            python scripts/ci_helpers.py candidates "${{ github.event.inputs.contract }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_mode=automatic" >> "$GITHUB_OUTPUT"
+            echo "candidates=$ALL_CONTRACTS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Change detection (mpf_monitor.py -- lightweight index.json only)
+        id: monitor
+        run: |
+          if [ "${{ steps.mode.outputs.run_mode }}" = "manual" ]; then
+            echo "Manual mode: bypassing change detection for selected contract(s)."
+            SEL="${{ github.event.inputs.contract }}"
+            python scripts/ci_helpers.py candidates "$SEL" >> "$GITHUB_OUTPUT"
+            echo "errored=" >> "$GITHUB_OUTPUT"
+          else
+            python scripts/mpf_monitor.py --state state/mpf_state.json \
+              --contracts "${{ steps.mode.outputs.candidates }}" --json > monitor_result.json
+            cat monitor_result.json
+            python scripts/ci_helpers.py monitor-outputs monitor_result.json >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write job summary header
+        run: |
+          {
+            echo "## MPF Validation Run"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Run mode | ${{ steps.mode.outputs.run_mode }} |"
+            echo "| Plan year | CY${{ env.PLAN_YEAR }} |"
+            echo "| Candidate contracts | ${{ steps.mode.outputs.candidates }} |"
+            echo "| Contracts to validate | ${{ steps.monitor.outputs.to_run }} |"
+            echo "| Contracts with change-detection fetch errors | ${{ steps.monitor.outputs.errored || 'none' }} |"
+            echo ""
+            echo "### Contract status table"
+            echo ""
+            echo "| Contract | Status |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          IFS=',' read -ra ALL <<< "$ALL_CONTRACTS"
+          IFS=',' read -ra RUN <<< "${{ steps.monitor.outputs.to_run }}"
+          for c in "${ALL[@]}"; do
+            found=0
+            for r in "${RUN[@]}"; do [ "$r" = "$c" ] && found=1; done
+            if [ "$found" = "1" ]; then
+              echo "| $c | will run |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| $c | skipped - no change |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Run mpf_audit.py and email per changed contract
+        id: run_all
+        run: |
+          mkdir -p reports
+          RUN_MODE="${{ steps.mode.outputs.run_mode }}"
+          IFS=',' read -ra RUN <<< "${{ steps.monitor.outputs.to_run }}"
+          STATE_UPDATES=""
+          {
+            echo ""
+            echo "### Per-contract validation results"
+            echo ""
+            echo "| Contract | mpf_audit.py exit code | Report generated | Result | Email |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for c in "${RUN[@]}"; do
+            [ -z "$c" ] && continue
+            echo "=== Validating $c ==="
+
+            PREV=$(python scripts/ci_helpers.py previous-state state/mpf_state.json "$c")
+
+            # ---- run the existing, unmodified validation script ----------
+            set +e
+            python mpf_audit.py --out reports --contracts "$c" > "reports/run_${c}.log" 2>&1
+            RC=$?
+            set -e
+            echo "mpf_audit.py exit code for $c: $RC"
+
+            DOCX=$(ls -t reports/MPF_Provider_Directory_Audit_CY${PLAN_YEAR}_*.docx 2>/dev/null | head -n1 || true)
+            CSV="reports/findings_${c}.csv"
+
+            # ---- distinguish automation failure vs validation result -----
+            # RC 3 = unhandled crash (added wrapper in mpf_audit.py).
+            # RC 2 = bad invocation / no matching contracts.
+            # Any RC plus a MISSING expected docx/csv = treat as automation
+            # failure regardless of RC, per README's documented fallback.
+            AUTOMATION_FAILURE=0
+            if [ "$RC" = "3" ] || [ "$RC" = "2" ]; then
+              AUTOMATION_FAILURE=1
+            fi
+            if [ -z "$DOCX" ] || [ ! -f "$CSV" ]; then
+              AUTOMATION_FAILURE=1
+            fi
+
+            NEW_LU=$(python scripts/mpf_monitor.py --state state/mpf_state.json --contracts "$c" --json 2>/dev/null | python -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('current') or '')" 2>/dev/null || true)
+
+            if [ "$AUTOMATION_FAILURE" = "1" ]; then
+              RESULT_TEXT="AUTOMATION FAILURE"
+              DETAIL=$(tail -n 40 "reports/run_${c}.log" 2>/dev/null || true)
+              python scripts/email_report.py --kind automation-crash --contract "$c" \
+                --plan-year "$PLAN_YEAR" --run-mode "$RUN_MODE" \
+                --previous-last-updated "$PREV" --new-last-updated "$NEW_LU" \
+                --exit-code "$RC" --error-detail "$DETAIL" || echo "email send failed for $c (see logs)"
+              EMAIL_STATUS="sent (crash notice)"
+              # Do NOT advance state on failure -- next run retries this contract.
+            else
+              if [ "$RC" = "1" ]; then
+                RESULT_TEXT="findings reported"
+                KIND="updated-findings"
+              else
+                RESULT_TEXT="clean"
+                KIND="updated-success"
+              fi
+              if [ "$RUN_MODE" = "manual" ]; then
+                KIND="manual-run"
+              fi
+              python scripts/email_report.py --kind "$KIND" --contract "$c" \
+                --plan-year "$PLAN_YEAR" --run-mode "$RUN_MODE" \
+                --previous-last-updated "$PREV" --new-last-updated "$NEW_LU" \
+                --exit-code "$RC" --report-path "$DOCX" --csv-path "$CSV" \
+                || echo "email send failed for $c (see logs)"
+              EMAIL_STATUS="sent"
+
+              # Only advance state for AUTOMATIC runs after a successful
+              # validation + report. Manual runs bypass change detection and
+              # must not silently alter automatic-mode state tracking.
+              if [ "$RUN_MODE" = "automatic" ] && [ -n "$NEW_LU" ]; then
+                STATE_UPDATES="${STATE_UPDATES}${c}=${NEW_LU};"
+              fi
+            fi
+
+            echo "| $c | $RC | $([ -n "$DOCX" ] && echo yes || echo no) | $RESULT_TEXT | $EMAIL_STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "STATE_UPDATES<<EOF" >> "$GITHUB_ENV"
+          echo "$STATE_UPDATES" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+        env:
+          PLAN_YEAR: ${{ env.PLAN_YEAR }}
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpf-reports-${{ github.run_id }}
+          path: |
+            reports/*.docx
+            reports/*.csv
+            reports/*.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Update and commit state (automatic mode, successful contracts only)
+        if: steps.mode.outputs.run_mode == 'automatic' && env.STATE_UPDATES != ''
+        run: |
+          python scripts/ci_helpers.py update-state state/mpf_state.json "$STATE_UPDATES"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/mpf_state.json
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "chore: update MPF change-detection state [skip ci]"
+            git push
+          fi
+
+      - name: Final result table
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "### Final result"
+            echo ""
+            echo "Run mode: ${{ steps.mode.outputs.run_mode }} | Contracts validated: ${{ steps.monitor.outputs.to_run || '(none)' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

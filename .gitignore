@@ -1,0 +1,26 @@
+# Caches / build artifacts
+.mpf_cache/
+__pycache__/
+*.pyc
+
+# Pre-existing and workflow-generated report output -- these are outputs,
+# not source, and are handled via the workflow's upload-artifact step and
+# email attachments instead of being committed.
+reports/*.docx
+reports/*.csv
+reports/*.log
+MPF_*.docx
+MPF_Conformance_Report_*.docx
+findings_*.csv
+conformance_findings_*.csv
+monitor_result.json
+
+# Keep these tracked despite the patterns above
+!reports/.gitkeep
+!state/mpf_state.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

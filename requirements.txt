@@ -1,0 +1,8 @@
+# mpf_audit.py / mpf_conformance.py
+ijson
+python-docx
+openpyxl
+
+# scripts/mpf_monitor.py and scripts/email_report.py use only the Python
+# standard library (urllib, smtplib, json, csv, argparse) -- no extra
+# packages required for them.
