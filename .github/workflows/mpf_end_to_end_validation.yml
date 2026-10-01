@@ -26,6 +26,9 @@ concurrency:
   group: mpf-validation
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 env:
   PLAN_YEAR: "2027"
   ALL_CONTRACTS: "H1619,H3124,H5826,H9207"
